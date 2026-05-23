@@ -1,0 +1,19 @@
+# 模型文件（太大，GitHub 一般不存大文件）
+*.onnx
+*.tar.bz2
+*.zip
+sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/
+
+# 编译产物
+sherpa-onnx-master/
+build/
+
+# 虚拟环境
+venv/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 音频文件
+*.wav
