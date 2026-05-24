@@ -1,0 +1,5 @@
+sherpa-onnx
+flask
+flask-sock
+numpy
+pypinyin
