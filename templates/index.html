@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>语音输入法</title>
+    <style>
+        body { font-family: sans-serif; max-width: 1200px; margin: 20px auto; text-align: left; background-color: #f4f4f9; padding: 0 20px; }
+        .main-layout { display: flex; gap: 20px; align-items: flex-start; }
+        .left-panel { flex: 2; min-width: 0; }
+        .right-panel { flex: 1; min-width: 300px; }
+        .container { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin-bottom: 20px; height: 100%; box-sizing: border-box; }
+        h1 { margin-top: 0; font-size: 24px; color: #333; }
+        .display-area { 
+            width: 100%; 
+            height: 450px; 
+            font-size: 18px; 
+            margin: 20px 0; 
+            padding: 15px; 
+            border-radius: 8px; 
+            border: 1px solid #ddd; 
+            background: #fff;
+            text-align: left;
+            overflow-y: auto;
+            line-height: 1.8;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+            box-sizing: border-box;
+        }
+        #confirmedView { color: #333; display: inline; }
+        #partialView { color: #888; display: inline; }
+        button { padding: 12px 24px; font-size: 16px; cursor: pointer; margin: 5px; border: none; border-radius: 5px; color: white; transition: 0.3s; }
+        .start { background-color: #28a745; }
+        .stop { background-color: #dc3545; }
+        .reset { background-color: #ffc107; color: black; }
+        button:disabled { background-color: #ccc; }
+        .hotword-manager { text-align: left; display: flex; flex-direction: column; }
+        .hotword-input { display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px; }
+        .hotword-input input { padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
+        .hotword-list { flex: 1; max-height: 500px; overflow-y: auto; border-top: 1px solid #eee; padding-top: 10px; }
+        .hotword-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #f9f9f9; }
+        .hotword-item span { flex: 1; font-size: 14px; }
+        .hotword-item button { padding: 4px 8px; font-size: 12px; background-color: #ff4d4f; margin-left: 10px; }
+        
+        @media (max-width: 900px) {
+            .main-layout { flex-direction: column; }
+            .right-panel { min-width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <div class="main-layout">
+        <div class="left-panel">
+            <div class="container">
+                <h1>🎤 极速语音输入法</h1>
+                <div id="status">准备就绪</div>
+                <div class="display-area" id="displayArea">
+                    <span id="confirmedView"></span><span id="partialView"></span>
+                </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <button id="startBtn" class="start" onclick="startRec()">开始录音</button> 
+                        <button id="stopBtn" class="stop" onclick="stopRec()" disabled>停止录音</button> 
+                    </div>
+                    <button id="resetBtn" class="reset" onclick="resetAll()">清空文字</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="right-panel">
+            <div class="container hotword-manager">
+                <h3>🔥 热词管理</h3>
+                <div class="hotword-input">
+                    <input type="text" id="originWord" placeholder="原始错误词 (如: 照昭)">
+                    <input type="text" id="targetWord" placeholder="纠正后词 (如: 朝)">
+                    <button class="start" onclick="addHotword()" style="width: 100%; margin: 0; padding: 10px;">添加热词</button>
+                </div>
+                <div id="hotwordList" class="hotword-list">
+                    <!-- 热词列表将显示在这里 -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws, audioContext, processor, source;
+        let confirmedHistory = ""; 
+        let partialText = "";
+        let renderPending = false;
+        const MAX_DISPLAY_LEN = 1000; // 限制前端显示长度，防止超长文本卡顿
+
+        function trimDisplayText(text) {
+            if (text.length > MAX_DISPLAY_LEN) {
+                return "..." + text.slice(-MAX_DISPLAY_LEN);
+            }
+            return text;
+        }
+
+        function renderOutput() {
+            const confirmedView = document.getElementById('confirmedView');
+            const partialView = document.getElementById('partialView');
+            const displayArea = document.getElementById('displayArea');
+
+            confirmedView.textContent = trimDisplayText(confirmedHistory);
+            partialView.textContent = partialText ? (" " + partialText) : "";
+            
+            // 使用 smooth 滚动，并确保总是滚动到最新内容
+            displayArea.scrollTo({
+                top: displayArea.scrollHeight,
+                behavior: 'auto' // 'auto' 比 'smooth' 在高频刷新时更不容易堆积
+            });
+            renderPending = false;
+        }
+
+        function scheduleRender() {
+            if (renderPending) return;
+            renderPending = true;
+            requestAnimationFrame(renderOutput);
+        }
+         
+        function appendNoOverlap(history, text) {
+            if (!history) return text;
+            if (!text) return history;
+
+            let result = "";
+            // 性能优化：只对比最后 30 个字符，防止超长文本下的 slice 开销
+            const lookback = history.slice(-30);
+            const maxLen = Math.min(lookback.length, text.length, 20);
+            
+            let overlapFound = false;
+            for (let i = maxLen; i > 0; i--) {
+                if (lookback.endsWith(text.slice(0, i))) {
+                    result = history + text.slice(i);
+                    overlapFound = true;
+                    break;
+                }
+            }
+
+            if (!overlapFound) {
+                // 智能加标点逻辑
+                const lastChar = history.slice(-1);
+                if (history.length > 0 && !/[，。？！,.;?]/.test(lastChar)) {
+                    result = history + "，" + text;
+                } else {
+                    result = history + text;
+                }
+            }
+
+            const MAX_HISTORY = 2000;
+            if (result.length > MAX_HISTORY) {
+                result = result.slice(-MAX_HISTORY);
+            }
+            return result;
+        }
+
+        async function startRec() { 
+            // 保持当前已有的 confirmedHistory，不需要从 DOM 读取，因为它是 JS 维护的
+            partialText = "";
+            
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'; 
+            ws = new WebSocket(`${protocol}//${location.host}/ws`); 
+             
+            ws.onopen = () => { 
+                document.getElementById('status').innerText = '🎙️ 正在录音...'; 
+                document.getElementById('startBtn').disabled = true; 
+                document.getElementById('stopBtn').disabled = false; 
+            }; 
+ 
+            ws.onmessage = e => { 
+                try {
+                    const data = JSON.parse(e.data);
+                    
+                    if (data.type === 'confirmed') {
+                        // 确认文本进入历史
+                        confirmedHistory = appendNoOverlap(confirmedHistory, data.text);
+                        partialText = ""; // 清空预览
+                        scheduleRender();
+                    } else if (data.type === 'partial') {
+                        // 更新预览文本
+                        partialText = data.text;
+                        scheduleRender();
+                    }
+                } catch(err) {
+                    console.error("Parse error:", e.data);
+                }
+            }; 
+ 
+            ws.onclose = () => {
+                document.getElementById('startBtn').innerText = '继续录音';
+                stopRec();
+            }; 
+ 
+            try { 
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); 
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 }); 
+                source = audioContext.createMediaStreamSource(stream); 
+                processor = audioContext.createScriptProcessor(512, 1, 1); 
+                 
+                processor.onaudioprocess = (e) => { 
+                    const inputData = e.inputBuffer.getChannelData(0); 
+                    if (ws && ws.readyState === WebSocket.OPEN) { 
+                        ws.send(inputData.slice().buffer); 
+                    } 
+                }; 
+ 
+                source.connect(processor); 
+                processor.connect(audioContext.destination); 
+            } catch (err) { 
+                alert('无法开启麦克风：' + err); 
+            } 
+        } 
+ 
+        function stopRec() { 
+            if (processor) { processor.disconnect(); processor = null; } 
+            if (source) { source.disconnect(); source = null; } 
+            if (audioContext) { audioContext.close(); audioContext = null; } 
+            if (ws) { ws.close(); ws = null; } 
+             
+            document.getElementById('status').innerText = '已停止'; 
+            document.getElementById('startBtn').disabled = false; 
+            document.getElementById('stopBtn').disabled = true; 
+        }
+
+        function resetAll() {
+            if(!confirm("确定要清空所有文字吗？")) return;
+            stopRec();
+            confirmedHistory = ""; 
+            partialText = "";
+            scheduleRender();
+            document.getElementById('startBtn').innerText = '开始录音';
+            fetch('/reset');
+        }
+
+        // 热词管理逻辑
+        async function loadHotwords() {
+            const res = await fetch('/get_hotwords');
+            const hotwords = await res.json();
+            const list = document.getElementById('hotwordList');
+            list.innerHTML = '';
+            for (const [origin, target] of Object.entries(hotwords)) {
+                const item = document.createElement('div');
+                item.className = 'hotword-item';
+                item.innerHTML = `
+                    <span><b>${origin}</b> ➔ ${target}</span>
+                    <button onclick="delHotword('${origin}')">删除</button>
+                `;
+                list.appendChild(item);
+            }
+        }
+
+        async function addHotword() {
+            const origin = document.getElementById('originWord').value.trim();
+            const target = document.getElementById('targetWord').value.trim();
+            if (!origin || !target) return alert('请填写完整');
+            
+            await fetch('/add_hotword', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ origin, target })
+            });
+            
+            document.getElementById('originWord').value = '';
+            document.getElementById('targetWord').value = '';
+            loadHotwords();
+        }
+
+        async function delHotword(origin) {
+            await fetch('/del_hotword', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ origin })
+            });
+            loadHotwords();
+        }
+
+        // 页面加载时初始化热词列表
+        window.onload = loadHotwords;
+    </script>
+</body>
+</html>
